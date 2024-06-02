@@ -204,10 +204,10 @@ def get_model_answers(
                     #     if len(stop_token_ids_index) > 0:
                     #         output_ids = output_ids[: stop_token_ids_index[0]]
 
-                    # output = tokenizer.decode(
-                    #     output_ids,
-                    #     spaces_between_special_tokens=False,
-                    # )
+                    output = tokenizer.decode(
+                        output_ids,
+                        spaces_between_special_tokens=False,
+                    )
                     # if conv.stop_str and isinstance(conv.stop_str, list):
                     #     stop_str_indices = sorted(
                     #         [
