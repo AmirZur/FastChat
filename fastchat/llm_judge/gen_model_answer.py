@@ -16,10 +16,18 @@ from tqdm import tqdm
 from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
+from pyreft import get_intervention_locations, ReftModel
+import sys
+sys.path.extend(['../../../../clones/guard-reft/baselines'])
+# import get_template from HarmBench
+from model_utils import get_template
 
 
 def run_eval(
     model_path,
+    reft_model_path,
+    pos_size,
+    num_skip_interventions,
     model_id,
     question_file,
     question_begin,
@@ -54,6 +62,7 @@ def run_eval(
         ans_handles.append(
             get_answers_func(
                 model_path,
+                reft_model_path,
                 model_id,
                 questions[i : i + chunk_size],
                 answer_file,
@@ -63,6 +72,8 @@ def run_eval(
                 max_gpu_memory,
                 dtype=dtype,
                 revision=revision,
+                pos_size=pos_size,
+                num_skip_interventions=num_skip_interventions,
             )
         )
 
@@ -70,9 +81,48 @@ def run_eval(
         ray.get(ans_handles)
 
 
+def get_reft_input(
+    tokenizer, 
+    template, 
+    prompt, 
+    device='cuda:0',
+    pos_size=1,
+    num_skip_interventions=0,
+    num_interventions=1
+):
+    before_tc, after_tc = template.split('{instruction}')
+    cache_input_ids = tokenizer([before_tc], padding=False)['input_ids'] # some tokenizer have <s> for before_tc
+    cache_input_ids += tokenizer([prompt, after_tc], padding=False, add_special_tokens=False)['input_ids']
+    cache_input_ids = [torch.tensor(input_ids, dtype=torch.long).unsqueeze(0) for input_ids in cache_input_ids] # make tensor separately because can't return_tensors='pt' in tokenizer
+    before_ids, behavior_ids, after_ids = cache_input_ids
+
+    input_ids = torch.cat(cache_input_ids, dim=-1)
+    input_ids = input_ids.to(device)
+
+    behavior_length = behavior_ids.shape[-1]
+    intervention_locations = get_intervention_locations(
+        last_position=behavior_length, 
+        first_n=pos_size, 
+        last_n=pos_size,
+        pad_mode="last",
+        num_interventions=num_interventions,
+        share_weights=True,
+    )
+    intervention_locations = (torch.tensor(intervention_locations) + before_ids.shape[-1]).tolist()
+    # batch size of 1
+    unit_locations = [[i] for i in intervention_locations]
+
+    # skip first n interventions
+    for i in range(num_skip_interventions):
+        unit_locations[i] = None
+    
+    return input_ids, unit_locations
+
+
 @torch.inference_mode()
 def get_model_answers(
     model_path,
+    reft_model_path,
     model_id,
     questions,
     answer_file,
@@ -82,9 +132,12 @@ def get_model_answers(
     max_gpu_memory,
     dtype,
     revision,
+    pos_size=1,
+    num_skip_interventions=0
 ):
     model, tokenizer = load_model(
         model_path,
+        reft_model_path,
         revision=revision,
         device="cuda",
         num_gpus=num_gpus_per_model,
@@ -94,6 +147,7 @@ def get_model_answers(
         cpu_offloading=False,
         debug=False,
     )
+    assert isinstance(model, ReftModel), "Only supporting REFT models for now."
 
     for question in tqdm(questions):
         if question["category"] in temperature_config:
@@ -104,15 +158,22 @@ def get_model_answers(
         choices = []
         for i in range(num_choices):
             torch.manual_seed(i)
-            conv = get_conversation_template(model_id)
+            # conv = get_conversation_template(model_id)
+            # set return_fschat_conv=False for zephyr-7b
+            template = get_template(model_path, return_fschat_conv=False)['prompt']
             turns = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
-                conv.append_message(conv.roles[0], qs)
-                conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt()
-                input_ids = tokenizer([prompt]).input_ids
-
+                input_ids, unit_locations = get_reft_input(
+                    tokenizer,
+                    template,
+                    qs,
+                    device=model.get_device(),
+                    pos_size=pos_size,
+                    num_skip_interventions=num_skip_interventions,
+                    num_interventions=len(model.representations)
+                )
+                
                 if temperature < 1e-4:
                     do_sample = False
                 else:
@@ -120,8 +181,10 @@ def get_model_answers(
 
                 # some models may error out when generating long outputs
                 try:
-                    output_ids = model.generate(
-                        torch.as_tensor(input_ids).cuda(),
+                    _, output_ids = model.generate(
+                        {"input_ids": input_ids},
+                        unit_locations={"sources->base": (None, unit_locations)},
+                        intervene_on_prompt=True,
                         do_sample=do_sample,
                         temperature=temperature,
                         max_new_tokens=max_new_token,
@@ -132,31 +195,31 @@ def get_model_answers(
                         output_ids = output_ids[0][len(input_ids[0]) :]
 
                     # be consistent with the template's stop_token_ids
-                    if conv.stop_token_ids:
-                        stop_token_ids_index = [
-                            i
-                            for i, id in enumerate(output_ids)
-                            if id in conv.stop_token_ids
-                        ]
-                        if len(stop_token_ids_index) > 0:
-                            output_ids = output_ids[: stop_token_ids_index[0]]
+                    # if conv.stop_token_ids:
+                    #     stop_token_ids_index = [
+                    #         i
+                    #         for i, id in enumerate(output_ids)
+                    #         if id in conv.stop_token_ids
+                    #     ]
+                    #     if len(stop_token_ids_index) > 0:
+                    #         output_ids = output_ids[: stop_token_ids_index[0]]
 
-                    output = tokenizer.decode(
-                        output_ids,
-                        spaces_between_special_tokens=False,
-                    )
-                    if conv.stop_str and isinstance(conv.stop_str, list):
-                        stop_str_indices = sorted(
-                            [
-                                output.find(stop_str)
-                                for stop_str in conv.stop_str
-                                if output.find(stop_str) > 0
-                            ]
-                        )
-                        if len(stop_str_indices) > 0:
-                            output = output[: stop_str_indices[0]]
-                    elif conv.stop_str and output.find(conv.stop_str) > 0:
-                        output = output[: output.find(conv.stop_str)]
+                    # output = tokenizer.decode(
+                    #     output_ids,
+                    #     spaces_between_special_tokens=False,
+                    # )
+                    # if conv.stop_str and isinstance(conv.stop_str, list):
+                    #     stop_str_indices = sorted(
+                    #         [
+                    #             output.find(stop_str)
+                    #             for stop_str in conv.stop_str
+                    #             if output.find(stop_str) > 0
+                    #         ]
+                    #     )
+                    #     if len(stop_str_indices) > 0:
+                    #         output = output[: stop_str_indices[0]]
+                    # elif conv.stop_str and output.find(conv.stop_str) > 0:
+                    #     output = output[: output.find(conv.stop_str)]
 
                     for special_token in tokenizer.special_tokens_map.values():
                         if isinstance(special_token, list):
@@ -166,13 +229,13 @@ def get_model_answers(
                             output = output.replace(special_token, "")
                     output = output.strip()
 
-                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                        output = output.replace("Assistant:", "", 1).strip()
+                    # if conv.name == "xgen" and output.startswith("Assistant:"):
+                    #     output = output.replace("Assistant:", "", 1).strip()
                 except RuntimeError as e:
                     print("ERROR question ID: ", question["question_id"])
                     output = "ERROR"
 
-                conv.update_last_message(output)
+                # conv.update_last_message(output)
                 turns.append(output)
 
             choices.append({"index": i, "turns": turns})
@@ -211,6 +274,24 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
+    )
+    parser.add_argument(
+        "--reft-model-path",
+        type=str,
+        required=True,
+        help="The path to the REFT weights. This can be a local folder or a Hugging Face repo ID.",
+    )
+    parser.add_argument(
+        "--pos-size",
+        type=int,
+        default=1,
+        help="The number of positions to intervene on.",
+    )
+    parser.add_argument(
+        "--num-skip-interventions",
+        type=int,
+        default=0,
+        help="The number of interventions to skip.",
     )
     parser.add_argument(
         "--model-id", type=str, required=True, help="A custom name for the model."
@@ -261,7 +342,7 @@ if __name__ == "__main__":
         type=str,
         choices=["float32", "float16", "bfloat16"],
         help="Override the default dtype. If not set, it will use float16 on GPU and float32 on CPU.",
-        default=None,
+        default="bfloat16",
     )
     parser.add_argument(
         "--revision",
@@ -287,6 +368,9 @@ if __name__ == "__main__":
 
     run_eval(
         model_path=args.model_path,
+        reft_model_path=args.reft_model_path,
+        pos_size=args.pos_size,
+        num_skip_interventions=args.num_skip_interventions,
         model_id=args.model_id,
         question_file=question_file,
         question_begin=args.question_begin,

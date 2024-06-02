@@ -45,6 +45,7 @@ from fastchat.modules.exllama import ExllamaConfig, load_exllama_model
 from fastchat.modules.xfastertransformer import load_xft_model, XftConfig
 from fastchat.modules.gptq import GptqConfig, load_gptq_quantized
 from fastchat.utils import get_gpu_memory
+from pyreft import ReftModel
 
 # Check an environment variable to check if we should be sharing Peft model
 # weights.  When false we treat all Peft models as separate.
@@ -189,6 +190,7 @@ def raise_warning_for_incompatible_cpu_offloading_configuration(
 
 def load_model(
     model_path: str,
+    reft_model_path : str,
     device: str = "cuda",
     num_gpus: int = 1,
     max_gpu_memory: Optional[str] = None,
@@ -224,6 +226,7 @@ def load_model(
                     "Intel Extension for PyTorch is not installed, it can be installed to accelerate cpu inference"
                 )
     elif device == "cuda":
+        # load model with bfloat16 for ReFT
         kwargs = {"torch_dtype": torch.float16}
         if num_gpus != 1:
             kwargs["device_map"] = "auto"
@@ -341,6 +344,7 @@ def load_model(
         return model, tokenizer
     kwargs["revision"] = revision
 
+    assert dtype == torch.bfloat16, "Only supports bfloat16 for ReFT model."
     if dtype is not None:  # Overwrite dtype if it is provided in the arguments.
         kwargs["torch_dtype"] = dtype
 
@@ -380,6 +384,11 @@ def load_model(
 
     if debug:
         print(model)
+
+    # load ReFT model
+    device = model.device
+    model = ReftModel.load(reft_model_path, model)
+    model.set_device(device)
 
     return model, tokenizer
 
