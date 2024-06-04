@@ -164,15 +164,20 @@ def get_model_answers(
             turns = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
-                input_ids, unit_locations = get_reft_input(
-                    tokenizer,
-                    template,
-                    qs,
-                    device=model.get_device(),
-                    pos_size=pos_size,
-                    num_skip_interventions=num_skip_interventions,
-                    num_interventions=len(model.representations)
+                prompt = template.format(instruction=qs)
+                inputs = tokenizer([prompt], return_tensors="pt").to(model.get_device())
+                input_ids = inputs["input_ids"]
+                last_position = input_ids.shape[-1]
+                intervention_locations = get_intervention_locations(
+                    last_position=last_position, 
+                    first_n=pos_size, 
+                    last_n=pos_size,
+                    pad_mode="last",
+                    num_interventions=len(model.representations),
+                    share_weights=True,
                 )
+                # (# interventions, # batches=1, # positions)
+                unit_locations = torch.tensor(intervention_locations).unsqueeze(1).tolist()
                 
                 if temperature < 1e-4:
                     do_sample = False
@@ -182,7 +187,7 @@ def get_model_answers(
                 # some models may error out when generating long outputs
                 try:
                     _, output_ids = model.generate(
-                        {"input_ids": input_ids},
+                        inputs,
                         unit_locations={"sources->base": (None, unit_locations)},
                         intervene_on_prompt=True,
                         do_sample=do_sample,
