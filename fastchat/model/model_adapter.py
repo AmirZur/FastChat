@@ -190,7 +190,7 @@ def raise_warning_for_incompatible_cpu_offloading_configuration(
 
 def load_model(
     model_path: str,
-    reft_model_path : str,
+    reft_model_path : str = '',
     device: str = "cuda",
     num_gpus: int = 1,
     max_gpu_memory: Optional[str] = None,
@@ -386,9 +386,10 @@ def load_model(
         print(model)
 
     # load ReFT model
-    device = model.device
-    model = ReftModel.load(reft_model_path, model)
-    model.set_device(device)
+    if reft_model_path:
+        device = model.device
+        model = ReftModel.load(reft_model_path, model)
+        model.set_device(device)
 
     return model, tokenizer
 

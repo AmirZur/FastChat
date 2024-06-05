@@ -147,7 +147,10 @@ def get_model_answers(
         cpu_offloading=False,
         debug=False,
     )
-    assert isinstance(model, ReftModel), "Only supporting REFT models for now."
+
+    print("Is ReFT model? ", isinstance(model, ReftModel))
+
+    device = model.get_device() if isinstance(model, ReftModel) else model.device
 
     stop_str = "<|user|>"
     for question in tqdm(questions):
@@ -166,19 +169,8 @@ def get_model_answers(
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
                 prompt = template.format(instruction=qs)
-                inputs = tokenizer([prompt], return_tensors="pt").to(model.get_device())
+                inputs = tokenizer([prompt], return_tensors="pt").to(device)
                 input_ids = inputs["input_ids"]
-                last_position = input_ids.shape[-1]
-                intervention_locations = get_intervention_locations(
-                    last_position=last_position, 
-                    first_n=pos_size, 
-                    last_n=pos_size,
-                    pad_mode="last",
-                    num_interventions=len(model.representations),
-                    share_weights=True,
-                )
-                # (# interventions, # batches=1, # positions)
-                unit_locations = torch.tensor(intervention_locations).unsqueeze(1).tolist()
                 
                 if temperature < 1e-4:
                     do_sample = False
@@ -187,14 +179,34 @@ def get_model_answers(
 
                 # some models may error out when generating long outputs
                 try:
-                    _, output_ids = model.generate(
-                        inputs,
-                        unit_locations={"sources->base": (None, unit_locations)},
-                        intervene_on_prompt=True,
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        max_new_tokens=max_new_token,
-                    )
+                    if isinstance(model, ReftModel):
+                        last_position = input_ids.shape[-1]
+                        intervention_locations = get_intervention_locations(
+                            last_position=last_position, 
+                            first_n=pos_size, 
+                            last_n=pos_size,
+                            pad_mode="last",
+                            num_interventions=len(model.representations),
+                            share_weights=True,
+                        )
+                        # (# interventions, # batches=1, # positions)
+                        unit_locations = torch.tensor(intervention_locations).unsqueeze(1).tolist()
+                        _, output_ids = model.generate(
+                            inputs,
+                            unit_locations={"sources->base": (None, unit_locations)},
+                            intervene_on_prompt=True,
+                            do_sample=do_sample,
+                            temperature=temperature,
+                            max_new_tokens=max_new_token,
+                        )
+                    else:
+                        output_ids = model.generate(
+                            **inputs,
+                            do_sample=do_sample,
+                            temperature=temperature,
+                            max_new_tokens=max_new_token,
+                        )
+
                     if model.config.is_encoder_decoder:
                         output_ids = output_ids[0]
                     else:
@@ -286,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reft-model-path",
         type=str,
-        required=True,
+        default=None,
         help="The path to the REFT weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(
