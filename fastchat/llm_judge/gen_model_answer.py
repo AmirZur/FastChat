@@ -149,6 +149,7 @@ def get_model_answers(
     )
     assert isinstance(model, ReftModel), "Only supporting REFT models for now."
 
+    stop_str = "<|user|>"
     for question in tqdm(questions):
         if question["category"] in temperature_config:
             temperature = temperature_config[question["category"]]
@@ -225,6 +226,8 @@ def get_model_answers(
                     #         output = output[: stop_str_indices[0]]
                     # elif conv.stop_str and output.find(conv.stop_str) > 0:
                     #     output = output[: output.find(conv.stop_str)]
+                    if stop_str and output.find(stop_str) > 0:
+                        output = output[: output.find(stop_str)]
 
                     for special_token in tokenizer.special_tokens_map.values():
                         if isinstance(special_token, list):
