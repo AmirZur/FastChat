@@ -26,6 +26,7 @@ from model_utils import get_template
 def run_eval(
     model_path,
     reft_model_path,
+    lora_model_path,
     pos_size,
     num_skip_interventions,
     model_id,
@@ -63,6 +64,7 @@ def run_eval(
             get_answers_func(
                 model_path,
                 reft_model_path,
+                lora_model_path,
                 model_id,
                 questions[i : i + chunk_size],
                 answer_file,
@@ -123,6 +125,7 @@ def get_reft_input(
 def get_model_answers(
     model_path,
     reft_model_path,
+    lora_model_path,
     model_id,
     questions,
     answer_file,
@@ -138,6 +141,7 @@ def get_model_answers(
     model, tokenizer = load_model(
         model_path,
         reft_model_path,
+        lora_model_path,
         revision=revision,
         device="cuda",
         num_gpus=num_gpus_per_model,
@@ -299,7 +303,13 @@ if __name__ == "__main__":
         "--reft-model-path",
         type=str,
         default=None,
-        help="The path to the REFT weights. This can be a local folder or a Hugging Face repo ID.",
+        help="The path to the ReFT weights. This can be a local folder or a Hugging Face repo ID.",
+    )
+    parser.add_argument(
+        "--lora-model-path",
+        type=str,
+        default=None,
+        help="The path to the LoRA weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(
         "--pos-size",
@@ -389,6 +399,7 @@ if __name__ == "__main__":
     run_eval(
         model_path=args.model_path,
         reft_model_path=args.reft_model_path,
+        lora_model_path=args.lora_model_path,
         pos_size=args.pos_size,
         num_skip_interventions=args.num_skip_interventions,
         model_id=args.model_id,

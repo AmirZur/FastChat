@@ -46,6 +46,7 @@ from fastchat.modules.xfastertransformer import load_xft_model, XftConfig
 from fastchat.modules.gptq import GptqConfig, load_gptq_quantized
 from fastchat.utils import get_gpu_memory
 from pyreft import ReftModel
+from peft import PeftModel
 
 # Check an environment variable to check if we should be sharing Peft model
 # weights.  When false we treat all Peft models as separate.
@@ -191,6 +192,7 @@ def raise_warning_for_incompatible_cpu_offloading_configuration(
 def load_model(
     model_path: str,
     reft_model_path : str = '',
+    lora_model_path : str = '',
     device: str = "cuda",
     num_gpus: int = 1,
     max_gpu_memory: Optional[str] = None,
@@ -390,6 +392,9 @@ def load_model(
         device = model.device
         model = ReftModel.load(reft_model_path, model)
         model.set_device(device)
+    elif lora_model_path:
+        model = PeftModel.from_pretrained(model, lora_model_path)
+        print(f"Loaded LoRA model (device={model.device})")
 
     return model, tokenizer
 
